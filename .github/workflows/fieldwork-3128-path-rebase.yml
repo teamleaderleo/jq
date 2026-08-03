@@ -1,0 +1,188 @@
+name: Fieldwork jq destructuring path rebase
+
+on:
+  push:
+    branches:
+      - experiment/3128-destructure-path-rebase
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-path-rebase.yml
+  pull_request:
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-path-rebase.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fieldwork-jq-3128-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_COMMIT: 603db3f57741d217ba651e61086b550a72148b83
+  COMPILE_BLOB: 80b723c119b45f99c5e847c2a463568eb730f498
+  EXECUTE_BLOB: ced1298764478d565fe9615f83b67171b2f70d53
+  OPCODE_BLOB: 85a8a5805f178819158c7a7b285a9c6abf18da0a
+  TEST_BLOB: 929c7217999f392d1ac536a39bc2c81456e2e6db
+
+jobs:
+  experiment:
+    name: ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ordinary, asan-ubsan]
+
+    steps:
+      - name: Check out controlled jq fork
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build and analysis dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            autoconf automake bison flex libtool make valgrind
+
+      - name: Verify source identity and apply experiment
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD master)" = "$BASE_COMMIT"
+          test "$(git hash-object src/compile.c)" = "$COMPILE_BLOB"
+          test "$(git hash-object src/execute.c)" = "$EXECUTE_BLOB"
+          test "$(git hash-object src/opcode_list.h)" = "$OPCODE_BLOB"
+          test "$(git hash-object tests/jq.test)" = "$TEST_BLOB"
+
+          python3 .github/fieldwork/3128/apply_path_rebase.py "$PWD"
+          git diff --check
+          git diff --name-only | sort >changed-source.txt
+          cat >expected-source.txt <<'EOF'
+          src/compile.c
+          src/execute.c
+          src/opcode_list.h
+          EOF
+          diff -u expected-source.txt changed-source.txt
+
+          mkdir -p "artifacts/$MODE"
+          git diff -- src/compile.c src/execute.c src/opcode_list.h \
+            >"artifacts/$MODE/source.patch"
+          printf '%s\n' "$BASE_COMMIT" >"artifacts/$MODE/base-commit.txt"
+          printf '%s\n' "$MODE" >"artifacts/$MODE/mode.txt"
+
+      - name: Configure and build exact experiment
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          autoreconf -fi
+          if [[ "$MODE" == asan-ubsan ]]; then
+            export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
+            export LDFLAGS='-fsanitize=address,undefined'
+          fi
+          ./configure --with-oniguruma=builtin
+          make -j2
+          ./jq --version
+
+      - name: Run semantic, path, and assignment probe
+        env:
+          MODE: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          bash .github/fieldwork/3128/probe.sh \
+            "$PWD/jq" "$PWD/artifacts/$MODE/probe"
+
+      - name: Run Valgrind path-state discriminators
+        if: matrix.mode == 'ordinary'
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          out="artifacts/$MODE/valgrind"
+          mkdir -p "$out"
+          status=0
+          while IFS=$'\t' read -r name input filter; do
+            case_status=0
+            printf '%s\n' "$input" | timeout 30s valgrind \
+              --quiet \
+              --error-exitcode=97 \
+              --leak-check=full \
+              --errors-for-leak-kinds=definite,indirect,possible \
+              --track-origins=yes \
+              ./jq -c "$filter" \
+              >"$out/$name.stdout" 2>"$out/$name.stderr" || case_status=$?
+            printf '%s\t%d\n' "$name" "$case_status" >>"$out/results.tsv"
+            if [[ $case_status -eq 97 || $case_status -eq 124 ]]; then
+              status=1
+            fi
+          done <<'EOF'
+          issue	null	path({} as {$a} | .)
+          source-body	{"src":{"a":1},"body":2}	path(.src as {$a} | .body)
+          alternation	null	path(({a:1}, [2], 3) as {$a} ?// [$a] ?// $a | .)
+          assignment	{"body":2}	({a:1} as {$a} | .body) = 9
+          EOF
+          printf '%d\n' "$status" >"$out/gate-status.txt"
+          test "$status" = 0
+
+      - name: Run complete jq test suite
+        if: always()
+        env:
+          MODE: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set +e
+          make check >"artifacts/$MODE/make-check.log" 2>&1
+          status=$?
+          set -e
+          printf '%d\n' "$status" >"artifacts/$MODE/make-check-status.txt"
+          if [[ -f test-suite.log ]]; then
+            cp test-suite.log "artifacts/$MODE/test-suite.log"
+          fi
+          find . -type f -name '*.log' -path '*/tests/*' -print0 | \
+            xargs -0 -r -I{} cp --parents '{}' "artifacts/$MODE/"
+          tail -n 100 "artifacts/$MODE/make-check.log"
+
+      - name: Retain exact experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jq-3128-path-rebase-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/${{ matrix.mode }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce experiment gates
+        if: always()
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          test -f "artifacts/$MODE/probe/results.tsv"
+          ! grep -q $'\tfail$' "artifacts/$MODE/probe/results.tsv"
+          test "$(cat "artifacts/$MODE/make-check-status.txt")" = 0
+          if [[ "$MODE" == ordinary ]]; then
+            test "$(cat "artifacts/$MODE/valgrind/gate-status.txt")" = 0
+          fi
+          {
+            echo "### jq #3128 path rebase — $MODE"
+            echo
+            echo '```text'
+            cat "artifacts/$MODE/probe/results.tsv"
+            echo '```'
+            echo
+            echo 'Assignment observations:'
+            echo '```text'
+            cat "artifacts/$MODE/probe/observations.tsv"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
