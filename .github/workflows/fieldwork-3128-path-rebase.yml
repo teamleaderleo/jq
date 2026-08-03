@@ -56,7 +56,7 @@ jobs:
           MODE: ${{ matrix.mode }}
         run: |
           set -euo pipefail
-          test "$(git merge-base HEAD master)" = "$BASE_COMMIT"
+          test "$(git merge-base HEAD origin/master)" = "$BASE_COMMIT"
           test "$(git hash-object src/compile.c)" = "$COMPILE_BLOB"
           test "$(git hash-object src/execute.c)" = "$EXECUTE_BLOB"
           test "$(git hash-object src/opcode_list.h)" = "$OPCODE_BLOB"
