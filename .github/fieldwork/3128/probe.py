@@ -28,9 +28,19 @@ cases = [
     Case("nested-constant-object", "path({b:{}} as {b:{$a}} | .)", [["b", "a"]]),
     Case("constant-array", "path([] as [$a] | .)", [[0]]),
     Case("constant-array-object", "path([{}] as [{$a}] | .)", [[0, "a"]]),
+    Case(
+        "dynamic-key-single-binding",
+        'path({"key":"a","a":null} as {(.key):$a} | .)',
+        [["a"]],
+    ),
     Case("alternation-object", "path({} as {$a} ?// [$a] | .)", [["a"]]),
     Case("alternation-array", "path([] as {$a} ?// [$a] | .)", [[0]]),
     Case("alternation-scalar", "path(1 as {$a} ?// [$a] ?// $a | .)", [[]]),
+    Case(
+        "alternation-nested-object",
+        "path({x:{}} as {x:{$a}} ?// [$a] | .)",
+        [["x", "a"]],
+    ),
     Case("backtracking-object", "path(({}, {}) as {$a} | .)", [["a"], ["a"]]),
     Case(
         "constant-bound-traversal",
