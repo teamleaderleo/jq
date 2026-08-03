@@ -1,0 +1,142 @@
+name: Fieldwork jq destructure path candidate
+
+on:
+  push:
+    branches:
+      - fieldwork/3128-destructure-index-path
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-destructure-index.yml
+  pull_request:
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-destructure-index.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fieldwork-jq-3128-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_BASE: 603db3f57741d217ba651e61086b550a72148b83
+  COMPILE_BLOB: 80b723c119b45f99c5e847c2a463568eb730f498
+  EXECUTE_BLOB: ced1298764478d565fe9615f83b67171b2f70d53
+  OPCODE_BLOB: 85a8a5805f178819158c7a7b285a9c6abf18da0a
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out controlled jq fork
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact product source fence
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$SOURCE_BASE")" = "$SOURCE_BASE"
+          test "$(git hash-object src/compile.c)" = "$COMPILE_BLOB"
+          test "$(git hash-object src/execute.c)" = "$EXECUTE_BLOB"
+          test "$(git hash-object src/opcode_list.h)" = "$OPCODE_BLOB"
+          git diff --name-only "$SOURCE_BASE"...HEAD | sort > /tmp/changed.txt
+          cat >/tmp/expected.txt <<'EOF'
+          .github/fieldwork/3128/README.md
+          .github/fieldwork/3128/apply_destructure_index.py
+          .github/fieldwork/3128/probe.py
+          .github/workflows/fieldwork-3128-destructure-index.yml
+          EOF
+          diff -u /tmp/expected.txt /tmp/changed.txt
+
+      - name: Apply dedicated destructuring-index experiment
+        run: |
+          set -euo pipefail
+          python3 .github/fieldwork/3128/apply_destructure_index.py
+          git diff --check
+          mkdir -p artifacts
+          git diff -- src/compile.c src/execute.c src/opcode_list.h > artifacts/candidate.patch
+          git diff --name-only > artifacts/candidate-files.txt
+          {
+            echo "carrier_head=$(git rev-parse HEAD)"
+            echo "source_base=$SOURCE_BASE"
+            echo "compile_before=$COMPILE_BLOB"
+            echo "execute_before=$EXECUTE_BLOB"
+            echo "opcode_before=$OPCODE_BLOB"
+            echo "compile_after=$(git hash-object src/compile.c)"
+            echo "execute_after=$(git hash-object src/execute.c)"
+            echo "opcode_after=$(git hash-object src/opcode_list.h)"
+          } > artifacts/source-identity.txt
+
+      - name: Install build and analysis dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            autoconf automake bison flex libtool make valgrind
+
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          git submodule update --init
+          autoreconf -i
+          ./configure --with-oniguruma=builtin
+          make -j2
+          ./jq --version | tee artifacts/version.txt
+          git diff --check
+
+      - name: Run semantic discriminator
+        run: |
+          set -euo pipefail
+          python3 .github/fieldwork/3128/probe.py "$PWD/jq" "$PWD/artifacts/probe"
+          ./jq --debug-dump-disasm -n 'path({} as {$a} | .)' \
+            > artifacts/disassembly.stdout 2> artifacts/disassembly.stderr
+          grep -q 'INDEX_DESTRUCTURE' artifacts/disassembly.stdout
+
+      - name: Run Valgrind discriminators
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/valgrind
+          filters=(
+            'path({} as {$a} | .)'
+            'path({b:{}} as {b:{$a}} | .)'
+            'path([] as {$a} ?// [$a] | .)'
+            'path(({}, {}) as {$a} | .)'
+            'path({a:{b:1}} as {$a} | $a.b)'
+            '{b:{a:1}} as {b:{$a}} | $a'
+          )
+          i=0
+          for filter in "${filters[@]}"; do
+            i=$((i + 1))
+            timeout 30s valgrind \
+              --quiet \
+              --error-exitcode=97 \
+              --leak-check=full \
+              --errors-for-leak-kinds=definite,indirect,possible \
+              --track-origins=yes \
+              ./jq -n -c "$filter" \
+              >"artifacts/valgrind/$i.stdout" \
+              2>"artifacts/valgrind/$i.stderr"
+          done
+
+      - name: Run complete jq test suite
+        run: |
+          set +e
+          make check > artifacts/make-check.log 2>&1
+          status=$?
+          set -e
+          printf '%d\n' "$status" > artifacts/make-check-status.txt
+          tail -n 100 artifacts/make-check.log
+          test "$status" = 0
+
+      - name: Upload exact candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jq-3128-destructure-index-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
