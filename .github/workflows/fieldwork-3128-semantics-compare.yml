@@ -1,0 +1,136 @@
+name: Fieldwork jq destructuring path semantics
+
+on:
+  push:
+    branches:
+      - research/3128-destructure-path-semantics
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-semantics-compare.yml
+  pull_request:
+    paths:
+      - .github/fieldwork/3128/**
+      - .github/workflows/fieldwork-3128-semantics-compare.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fieldwork-jq-3128-semantics-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JQ_BASE: 603db3f57741d217ba651e61086b550a72148b83
+  JQ_COMPILE_BLOB: 80b723c119b45f99c5e847c2a463568eb730f498
+  JQ_EXECUTE_BLOB: ced1298764478d565fe9615f83b67171b2f70d53
+  JQ_OPCODE_BLOB: 85a8a5805f178819158c7a7b285a9c6abf18da0a
+  GOJQ_COMMIT: 2e210b5c28122b106d4cd1fade3ac9dad0482026
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out controlled jq carrier
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check out exact gojq comparator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: itchyny/gojq
+          ref: ${{ env.GOJQ_COMMIT }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: _gojq
+
+      - name: Verify jq source fence and apply candidate
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD origin/master)" = "$JQ_BASE"
+          test "$(git hash-object src/compile.c)" = "$JQ_COMPILE_BLOB"
+          test "$(git hash-object src/execute.c)" = "$JQ_EXECUTE_BLOB"
+          test "$(git hash-object src/opcode_list.h)" = "$JQ_OPCODE_BLOB"
+          python3 .github/fieldwork/3128/apply_destructure_index.py
+          git diff --check
+          git diff --name-only | sort >candidate-files.txt
+          cat >expected-files.txt <<'EOF'
+          src/compile.c
+          src/execute.c
+          src/opcode_list.h
+          EOF
+          diff -u expected-files.txt candidate-files.txt
+
+      - name: Build candidate jq and pinned gojq
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            autoconf automake bison flex libtool make
+          autoreconf -fi
+          ./configure --with-oniguruma=builtin
+          make -j2
+          go version
+          (cd _gojq && go build -trimpath -o "$GITHUB_WORKSPACE/gojq" ./cmd/gojq)
+          ./jq --version
+          ./gojq --version
+
+      - name: Re-run selected jq candidate contract
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/candidate-contract
+          python3 .github/fieldwork/3128/probe.py \
+            "$PWD/jq" "$PWD/artifacts/candidate-contract"
+
+      - name: Compare sibling and loop semantics
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/comparison
+          python3 .github/fieldwork/3128/compare_gojq.py \
+            "$PWD/jq" "$PWD/gojq" "$PWD/artifacts/comparison" \
+            | tee artifacts/comparison/transcript.txt
+
+      - name: Retain exact identities and patch
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/identity
+          {
+            echo "jq_base=$JQ_BASE"
+            echo "jq_head=$(git rev-parse HEAD)"
+            echo "gojq_commit=$(git -C _gojq rev-parse HEAD)"
+            go version
+            cc --version | head -n1
+          } >artifacts/identity/source.txt
+          git diff -- src/compile.c src/execute.c src/opcode_list.h \
+            >artifacts/identity/candidate.patch
+          sha256sum jq gojq >artifacts/identity/binaries.sha256
+
+      - name: Upload semantic comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jq-3128-semantics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summarize comparison
+        if: always()
+        run: |
+          set -euo pipefail
+          test -f artifacts/comparison/differences.tsv
+          {
+            echo '### jq #3128 semantic comparison'
+            echo
+            echo 'gojq is an independent comparator, not a normative oracle.'
+            echo
+            echo '```text'
+            cat artifacts/comparison/differences.tsv
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
