@@ -77,6 +77,15 @@ jobs:
           python3 .github/fieldwork/3128/compare_multibinding.py \
             record "$PWD/jq" "$PWD/artifacts/baseline/multibinding"
 
+          # Autotools may rewrite tracked generated files with the runner's
+          # installed versions. Retain the built baseline outputs, but restore
+          # the exact committed product tree before applying and fencing the
+          # three-file candidate patch.
+          git reset --hard HEAD
+          test "$(git hash-object src/compile.c)" = "$COMPILE_BLOB"
+          test "$(git hash-object src/execute.c)" = "$EXECUTE_BLOB"
+          test "$(git hash-object src/opcode_list.h)" = "$OPCODE_BLOB"
+
       - name: Apply scoped destructuring-index experiment
         run: |
           set -euo pipefail
