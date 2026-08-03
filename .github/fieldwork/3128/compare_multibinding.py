@@ -32,6 +32,11 @@ CASES = [
     Case("sibling-renamed-body-x", "path({a:1,b:2} as {a:$x,b:$y} | $x)"),
     Case("sibling-renamed-body-y", "path({a:1,b:2} as {a:$x,b:$y} | $y)"),
     Case("sibling-reversed-pattern", "path({a:1,b:2} as {$b,$a} | .)"),
+    Case("repeated-binding-sites", "path({a:1,b:2} as {a:$x,b:$x} | .)"),
+    Case(
+        "dynamic-key-local-binding",
+        'path({"key":"a","a":null} as {(.key as $k | $k):$a} | .)',
+    ),
     Case("nested-siblings-body-a", "path({x:{a:1,b:2}} as {x:{$a,$b}} | $a)"),
     Case("nested-siblings-body-b", "path({x:{a:1,b:2}} as {x:{$a,$b}} | $b)"),
     Case("array-siblings-body-a", "path([10,20] as [$a,$b] | $a)"),
