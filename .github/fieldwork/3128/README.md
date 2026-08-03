@@ -1,52 +1,72 @@
-# jq #3128 destructuring-path experiment
+# jq #3128 single-binding destructuring-path experiment
 
-State: `CONTROLLED SOURCE EXPERIMENT — NO UPSTREAM SUBMISSION`
+State: `CONTROLLED SCOPED SOURCE EXPERIMENT — NO UPSTREAM SUBMISSION`
 
 Exact product base: `603db3f57741d217ba651e61086b550a72148b83`.
 
 ## Evidence leading to this candidate
 
-A four-layout compiler matrix showed that existing `SUBEXP` placement cannot express the required path semantics:
+A four-layout compiler matrix proved that existing `SUBEXP` placement cannot express the required path semantics:
 
 - canonical code rejects a matcher applied to a value that differs from the current path root;
-- closed PR #3384 fixes simple examples but breaks ordinary nested/array bindings and still fails alternation;
+- closed PR #3384 repairs simple examples but breaks ordinary nested/array bindings and alternatives;
 - delaying `SUBEXP_END` until after the matcher erases every matcher path component;
-- placing `POP` before that delayed `SUBEXP_END` corrupts the data stack and aborts.
+- placing `POP` before the delayed end corrupts the data stack and aborts.
 
-`subexp_nest` intentionally suppresses both path integrity checks and path component recording. A destructuring matcher needs a narrower exception: its input may come from a separate expression, but a successful matcher key/index and the resulting bound value must remain the current path state so later traversal through the bound variable continues to work.
+A first dedicated `INDEX_DESTRUCTURE` experiment then passed the reported single-binding cases, Valgrind, complete `make check`, and ordinary repository workflows. A separate multi-binding review exposed its over-broad compiler scope.
 
-## Experiment
+Sibling matchers each index the same retained container. Letting every matcher index advance one linear jq path manufactured artificial chains such as:
 
-The runner-local candidate introduces `INDEX_DESTRUCTURE` and emits it only from object and array destructuring matchers. At runtime it:
-
-1. indexes the actual value being destructured;
-2. skips only the ordinary requirement that this container equal the current `value_at_path`;
-3. records the matcher key/index through the existing `path_append()` logic;
-4. advances `value_at_path` to the bound result exactly as normal indexing does.
-
-This preserves valid chains such as:
-
-```jq
-path(. as {$a} | $a.b)
+```text
+["a","b"]
+["x","a","b"]
+[1,0]
 ```
 
-while leaving the normal final-result integrity check in place. A non-null expression such as `path({a:1} as {$a} | .)` remains invalid because the final original input is not the value reached at path `.a`.
+The apparent path depended on matcher order and which bound value the body returned. That candidate is held and must not be promoted as written.
 
-Ordinary `INDEX`, optional indexing, stack behavior, and product source outside the disposable runner remain unchanged.
+## Scoped experiment
+
+Matcher construction still tags only its own generated index operations as `INDEX_DESTRUCTURE`; ordinary indexes inside dynamic key expressions are not tagged.
+
+Before a complete matcher branch is bound to its body, the compiler counts unbound `STOREV`/`STOREVN` operations in that branch:
+
+- exactly one binding: retain `INDEX_DESTRUCTURE` for the branch;
+- zero or multiple bindings: restore every matcher-owned special index to canonical `INDEX`.
+
+Alternative branches are scoped independently before being wrapped in `DESTRUCTURE_ALT`. The final alternative is scoped separately, so sibling alternatives do not affect one another's count.
+
+At runtime the retained special opcode:
+
+1. indexes the actual separately produced matcher value;
+2. skips only the ordinary requirement that this container equal current `value_at_path`;
+3. records the one unambiguous matcher key/index through existing `path_append()`;
+4. advances `value_at_path` to the bound result for later bound-variable traversal;
+5. leaves the normal final-result integrity check in place.
+
+This keeps nested single-binding paths such as `{"x": [$a]}` expressible while refusing to invent a contract for `{$a,$b}`.
 
 ## Gates
 
-The controlled workflow verifies exact source blobs, applies the three-file experiment, builds jq, and runs:
+The controlled workflow first builds exact canonical jq and records status, stdout, and stderr for 24 multi-binding programs, including:
 
-- the exact null-valued issue forms;
-- nested object and array matchers;
-- alternation and backtracking;
-- bound-variable traversal for dot and constant sources;
-- expected-invalid non-null original-result controls;
-- ordinary bindings and plain paths;
-- a `setpath` consumer;
-- dedicated-opcode disassembly;
-- Valgrind discriminators;
-- complete `make check` and ordinary fork workflows.
+- sibling object and array bindings;
+- renamed and reversed patterns;
+- nested siblings;
+- source-path expressions;
+- alternatives;
+- source and body backtracking;
+- `reduce` and `foreach`;
+- correctly formed `setpath` consumers.
 
-No result is claimed until the hosted run completes. No canonical issue comment, pull request, review, or other upstream contact is authorized or made.
+It then applies the three-file scoped patch and requires:
+
+- the original single-binding semantic probe to pass;
+- every multi-binding observation to remain byte-identical to canonical jq;
+- single-binding disassembly to contain `INDEX_DESTRUCTURE`;
+- sibling disassembly to contain no `INDEX_DESTRUCTURE`;
+- Valgrind controls for both scopes;
+- complete `make check`;
+- exact product and carrier file fences.
+
+No result is claimed until the hosted run completes. No canonical issue comment, pull request, review, reaction, email, or other upstream contact is authorized or made.
