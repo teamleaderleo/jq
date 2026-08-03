@@ -46,6 +46,7 @@ jobs:
           test "$(git hash-object src/opcode_list.h)" = "$OPCODE_BLOB"
           git diff --name-only "$SOURCE_BASE"...HEAD | sort > /tmp/changed.txt
           cat >/tmp/expected.txt <<'EOF'
+          .github/fieldwork/3128/README.md
           .github/fieldwork/3128/apply_destructure_index.py
           .github/fieldwork/3128/probe.py
           .github/workflows/fieldwork-3128-destructure-index.yml
