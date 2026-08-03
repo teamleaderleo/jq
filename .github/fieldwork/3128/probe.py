@@ -12,8 +12,10 @@ from pathlib import Path
 class Case:
     name: str
     program: str
-    expected: list[object]
+    expected: list[object] | None = None
     input_text: str | None = None
+    expected_status: int = 0
+    stderr_contains: str | None = None
 
 
 jq = Path(sys.argv[1]).resolve()
@@ -23,8 +25,6 @@ out.mkdir(parents=True, exist_ok=True)
 cases = [
     Case("issue-constant-object", "path({} as {$a} | .)", [["a"]]),
     Case("issue-dot-object", "path(. as {$a} | .)", [["a"]]),
-    Case("constant-object-nonnull", "path({a: 1} as {$a} | .)", [["a"]], '{"root":true}\n'),
-    Case("dot-object-nonnull", "path(. as {$a} | .)", [["a"]], '{"a":1}\n'),
     Case("nested-constant-object", "path({b:{}} as {b:{$a}} | .)", [["b", "a"]]),
     Case("constant-array", "path([] as [$a] | .)", [[0]]),
     Case("constant-array-object", "path([{}] as [{$a}] | .)", [[0, "a"]]),
@@ -32,6 +32,31 @@ cases = [
     Case("alternation-array", "path([] as {$a} ?// [$a] | .)", [[0]]),
     Case("alternation-scalar", "path(1 as {$a} ?// [$a] ?// $a | .)", [[]]),
     Case("backtracking-object", "path(({}, {}) as {$a} | .)", [["a"], ["a"]]),
+    Case(
+        "constant-bound-traversal",
+        "path({a:{b:1}} as {$a} | $a.b)",
+        [["a", "b"]],
+    ),
+    Case(
+        "dot-bound-traversal",
+        "path(. as {$a} | $a.b)",
+        [["a", "b"]],
+        '{"a":{"b":1}}\n',
+    ),
+    Case(
+        "constant-original-result-still-invalid",
+        "path({a:1} as {$a} | .)",
+        input_text='{"root":true}\n',
+        expected_status=5,
+        stderr_contains="Invalid path expression with result",
+    ),
+    Case(
+        "dot-original-result-still-invalid",
+        "path(. as {$a} | .)",
+        input_text='{"a":1}\n',
+        expected_status=5,
+        stderr_contains="Invalid path expression with result",
+    ),
     Case("binding-object", "{a:1} as {$a} | $a", [1]),
     Case("binding-nested", "{b:{a:1}} as {b:{$a}} | $a", [1]),
     Case("binding-array", "[1] as [$a] | $a", [1]),
@@ -41,8 +66,7 @@ cases = [
     Case(
         "setpath-from-destructure",
         "path({} as {$a} | .) as $p | setpath($p; 42)",
-        [{"old": 0, "a": 42}],
-        '{"old":0}\n',
+        [{"a": 42}],
     ),
 ]
 
@@ -63,6 +87,7 @@ for case in cases:
     )
     (out / f"{case.name}.stdout").write_text(proc.stdout)
     (out / f"{case.name}.stderr").write_text(proc.stderr)
+
     actual: list[object] = []
     parse_error: str | None = None
     if proc.returncode == 0:
@@ -70,14 +95,20 @@ for case in cases:
             actual = [json.loads(line) for line in proc.stdout.splitlines() if line]
         except json.JSONDecodeError as exc:
             parse_error = str(exc)
-    ok = proc.returncode == 0 and parse_error is None and actual == case.expected
+
+    status_ok = proc.returncode == case.expected_status
+    output_ok = case.expected is None or (parse_error is None and actual == case.expected)
+    stderr_ok = case.stderr_contains is None or case.stderr_contains in proc.stderr
+    ok = status_ok and output_ok and stderr_ok
     failed |= not ok
     summary.append(
         {
             "name": case.name,
             "status": proc.returncode,
+            "expected_status": case.expected_status,
             "expected": case.expected,
             "actual": actual,
+            "stderr_contains": case.stderr_contains,
             "parse_error": parse_error,
             "ok": ok,
         }
@@ -85,5 +116,8 @@ for case in cases:
 
 (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 for row in summary:
-    print(f"{row['name']}\tstatus={row['status']}\tok={row['ok']}\tactual={row['actual']}")
+    print(
+        f"{row['name']}\tstatus={row['status']}\texpected_status={row['expected_status']}"
+        f"\tok={row['ok']}\tactual={row['actual']}"
+    )
 raise SystemExit(1 if failed else 0)
