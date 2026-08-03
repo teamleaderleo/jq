@@ -105,6 +105,7 @@ jobs:
             'path({b:{}} as {b:{$a}} | .)'
             'path([] as {$a} ?// [$a] | .)'
             'path(({}, {}) as {$a} | .)'
+            'path({a:{b:1}} as {$a} | $a.b)'
             '{b:{a:1}} as {b:{$a}} | $a'
           )
           i=0
