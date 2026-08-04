@@ -25,8 +25,10 @@ replace_once(
 
 compile_c = root / "src/compile.c"
 
-# Tag only the index operations owned by destructuring matcher construction.
-# Dynamic object-key expressions retain their ordinary INDEX instructions.
+# Tag only the fixed index operations owned by destructuring matcher
+# construction. A computed object-key expression can itself traverse or bind
+# values; preserving its canonical path-integrity behavior requires the
+# following matcher access to remain an ordinary INDEX.
 replace_once(
     compile_c,
     "  return BLOCK(gen_op_simple(DUP), gen_subexp(gen_const(jv_number(index))),\n"
@@ -36,17 +38,23 @@ replace_once(
 )
 replace_once(
     compile_c,
+    "block gen_object_matcher(block name, block curr) {\n"
     "  return BLOCK(gen_op_simple(DUP), gen_subexp(name), gen_op_simple(INDEX),\n"
-    "               curr);\n",
-    "  return BLOCK(gen_op_simple(DUP), gen_subexp(name),\n"
-    "               gen_op_simple(INDEX_DESTRUCTURE), curr);\n",
+    "               curr);\n"
+    "}\n",
+    "block gen_object_matcher(block name, block curr) {\n"
+    "  opcode index_op = block_is_const(name) ? INDEX_DESTRUCTURE : INDEX;\n"
+    "  return BLOCK(gen_op_simple(DUP), gen_subexp(name), gen_op_simple(index_op),\n"
+    "               curr);\n"
+    "}\n",
 )
 
-# A jq path is linear. A complete matcher branch with one binding has one
-# unambiguous matcher path. A branch with sibling bindings does not: every
-# sibling indexes the same retained container, so accumulating their keys would
-# manufacture a parent/child chain. Restore those matcher-owned instructions to
-# canonical INDEX unless the complete branch has exactly one unbound binding.
+# A jq path is linear. A complete matcher branch with one binding and fixed
+# matcher keys has one unambiguous matcher path. A branch with sibling bindings
+# does not: every sibling indexes the same retained container, so accumulating
+# their keys would manufacture a parent/child chain. Restore matcher-owned
+# special instructions to canonical INDEX unless the complete branch has
+# exactly one unbound binding.
 replace_once(
     compile_c,
     '''static void block_get_unbound_vars(block b, jv *vars) {
@@ -174,9 +182,10 @@ replace_once(
     "    case INDEX_OPT: {\n"
     "      jv t = stack_pop(jq);\n"
     "      jv k = stack_pop(jq);\n"
-    "      // A single-binding destructuring branch indexes a separately\n"
-    "      // produced matcher value, but its one key/index and resulting value\n"
-    "      // still form an unambiguous path for later bound traversal.\n"
+    "      // A single-binding destructuring branch with fixed matcher keys\n"
+    "      // indexes a separately produced matcher value, but its one\n"
+    "      // key/index and resulting value still form an unambiguous path for\n"
+    "      // later bound traversal.\n"
     "      if (opcode != INDEX_DESTRUCTURE && !path_intact(jq, jv_copy(t))) {\n"
     "        char keybuf[30];\n"
     "        char objbuf[30];\n"
