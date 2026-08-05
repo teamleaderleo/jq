@@ -25,10 +25,10 @@ replace_once(
 
 compile_c = root / "src/compile.c"
 
-# Tag only the fixed index operations owned by destructuring matcher
-# construction. A computed object-key expression can itself traverse or bind
-# values; preserving its canonical path-integrity behavior requires the
-# following matcher access to remain an ordinary INDEX.
+# Tag indexes owned by destructuring matcher construction. A dynamic object
+# key is still unambiguous when evaluating the key expression introduces no
+# binding of its own. A key expression such as `.key as $k | $k` must remain
+# canonical because its local binding participates in the path state.
 replace_once(
     compile_c,
     "  return BLOCK(gen_op_simple(DUP), gen_subexp(gen_const(jv_number(index))),\n"
@@ -42,8 +42,21 @@ replace_once(
     "  return BLOCK(gen_op_simple(DUP), gen_subexp(name), gen_op_simple(INDEX),\n"
     "               curr);\n"
     "}\n",
+    "static int block_has_destructure_key_binding(block b) {\n"
+    "  for (inst *i = b.first; i; i = i->next) {\n"
+    "    if (i->op == STOREV || i->op == STOREVN)\n"
+    "      return 1;\n"
+    "    if (block_has_destructure_key_binding(i->subfn) ||\n"
+    "        block_has_destructure_key_binding(i->arglist))\n"
+    "      return 1;\n"
+    "  }\n"
+    "  return 0;\n"
+    "}\n"
+    "\n"
     "block gen_object_matcher(block name, block curr) {\n"
-    "  opcode index_op = block_is_const(name) ? INDEX_DESTRUCTURE : INDEX;\n"
+    "  opcode index_op = block_has_destructure_key_binding(name)\n"
+    "                        ? INDEX\n"
+    "                        : INDEX_DESTRUCTURE;\n"
     "  return BLOCK(gen_op_simple(DUP), gen_subexp(name), gen_op_simple(index_op),\n"
     "               curr);\n"
     "}\n",
@@ -182,10 +195,10 @@ replace_once(
     "    case INDEX_OPT: {\n"
     "      jv t = stack_pop(jq);\n"
     "      jv k = stack_pop(jq);\n"
-    "      // A single-binding destructuring branch with fixed matcher keys\n"
-    "      // indexes a separately produced matcher value, but its one\n"
-    "      // key/index and resulting value still form an unambiguous path for\n"
-    "      // later bound traversal.\n"
+    "      // A single-binding destructuring branch with one matcher path\n"
+    "      // indexes a separately produced matcher value, but its key/index\n"
+    "      // and resulting value still form an unambiguous path for later\n"
+    "      // bound traversal.\n"
     "      if (opcode != INDEX_DESTRUCTURE && !path_intact(jq, jv_copy(t))) {\n"
     "        char keybuf[30];\n"
     "        char objbuf[30];\n"
